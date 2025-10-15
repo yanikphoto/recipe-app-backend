@@ -1,3 +1,4 @@
+
 const express = require('express');
 const cors = require('cors');
 const fs = require('fs');
@@ -7,8 +8,16 @@ const app = express();
 const PORT = process.env.PORT || 3001;
 
 // Middleware
-app.use(cors());
-app.use(express.json());
+// 🔥 FIX: Use a more explicit CORS configuration to prevent potential fetch errors.
+const corsOptions = {
+  origin: '*', // Allow all origins
+  methods: ['GET', 'POST'], // Specify allowed methods
+  allowedHeaders: ['Content-Type'], // Specify allowed headers
+};
+app.use(cors(corsOptions));
+app.options('*', cors(corsOptions)); // Enable pre-flight for all routes
+
+app.use(express.json({ limit: '10mb' }));
 
 // Data file path
 const DATA_FILE = path.join(__dirname, 'data.json');
@@ -23,7 +32,7 @@ const readData = () => {
     }
     return JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
   } catch (error) {
-    console.error('Error reading data:', error);
+    console.error('Error reading data file, returning empty state:', error);
     return { recipes: [], groceryList: [] };
   }
 };
@@ -38,34 +47,35 @@ const writeData = (data) => {
   }
 };
 
-// 🔥 NEW: Merge recipes properly
+// 🔥 HARDENED: Merge recipes properly, filtering out invalid entries.
 const mergeRecipes = (existingRecipes, newRecipes) => {
   const recipeMap = new Map();
   
-  // Add existing recipes first
-  existingRecipes.forEach(recipe => {
+  // Sanitize and add existing recipes first
+  // This prevents crashes if the arrays contain null, undefined, or objects without an ID.
+  (existingRecipes || []).filter(r => r && typeof r === 'object' && r.id).forEach(recipe => {
     recipeMap.set(recipe.id, recipe);
   });
   
-  // Add/override with new recipes
-  newRecipes.forEach(recipe => {
+  // Sanitize and add/override with new recipes
+  (newRecipes || []).filter(r => r && typeof r === 'object' && r.id).forEach(recipe => {
     recipeMap.set(recipe.id, recipe);
   });
   
   return Array.from(recipeMap.values());
 };
 
-// 🔥 NEW: Merge grocery items properly
+// 🔥 HARDENED: Merge grocery items properly, filtering out invalid entries.
 const mergeGroceryList = (existingItems, newItems) => {
   const itemMap = new Map();
   
-  // Add existing items first
-  existingItems.forEach(item => {
+  // Sanitize and add existing items first
+  (existingItems || []).filter(i => i && typeof i === 'object' && i.id).forEach(item => {
     itemMap.set(item.id, item);
   });
   
-  // Add/override with new items
-  newItems.forEach(item => {
+  // Sanitize and add/override with new items
+  (newItems || []).filter(i => i && typeof i === 'object' && i.id).forEach(item => {
     itemMap.set(item.id, item);
   });
   
@@ -83,25 +93,24 @@ app.get('/api/data', (req, res) => {
     const data = readData();
     res.json(data);
   } catch (error) {
+    console.error('Error in GET /api/data:', error);
     res.status(500).json({ error: 'Failed to read data' });
   }
 });
 
-// 🔥 FIXED: Save all data with proper merging
+// Save all data with proper merging
 app.post('/api/data', (req, res) => {
   try {
     const newData = req.body;
     
-    // Validate data structure
-    if (!newData.recipes || !Array.isArray(newData.recipes) || 
-        !newData.groceryList || !Array.isArray(newData.groceryList)) {
-      return res.status(400).json({ error: 'Invalid data structure' });
+    // Basic structure validation
+    if (!newData || typeof newData !== 'object' || !Array.isArray(newData.recipes) || !Array.isArray(newData.groceryList)) {
+      return res.status(400).json({ error: 'Invalid data structure: body must be an object with recipes and groceryList arrays.' });
     }
     
-    // 🔥 CRITICAL FIX: Read existing data first
     const existingData = readData();
     
-    // 🔥 CRITICAL FIX: Merge data instead of overwriting
+    // The merge functions now handle sanitation internally, preventing crashes from bad data.
     const mergedData = {
       recipes: mergeRecipes(existingData.recipes, newData.recipes),
       groceryList: mergeGroceryList(existingData.groceryList, newData.groceryList),
@@ -109,59 +118,66 @@ app.post('/api/data', (req, res) => {
     };
     
     console.log('📥 Merging data:');
-    console.log('  Existing recipes:', existingData.recipes.length);
-    console.log('  New recipes:', newData.recipes.length);
-    console.log('  Merged recipes:', mergedData.recipes.length);
+    console.log('  Existing recipes:', (existingData.recipes || []).length);
+    console.log('  New recipes from client:', newData.recipes.length);
+    console.log('  Merged recipes after sanitation:', mergedData.recipes.length);
+    console.log('  Merged grocery items after sanitation:', mergedData.groceryList.length);
     
     const success = writeData(mergedData);
     
     if (success) {
-      // 🔥 IMPORTANT: Return the merged data, not just success message
-      res.json(mergedData);
+      // Return the final, merged, and sanitized data to the client.
+      res.status(200).json(mergedData);
     } else {
       res.status(500).json({ error: 'Failed to save data' });
     }
   } catch (error) {
-    console.error('❌ Error in POST /api/data:', error);
-    res.status(500).json({ error: 'Failed to save data' });
+    console.error('❌ Unhandled error in POST /api/data:', error);
+    res.status(500).json({ error: 'An internal server error occurred.' });
   }
 });
 
-// 🔥 NEW: Add single recipe endpoint
+// Add/update a single recipe
 app.post('/api/recipes', (req, res) => {
   try {
     const newRecipe = req.body;
     
-    if (!newRecipe || !newRecipe.id) {
-      return res.status(400).json({ error: 'Invalid recipe data' });
+    // 🔥 HARDENED: Add more robust validation for the recipe object.
+    if (!newRecipe || typeof newRecipe !== 'object' || !newRecipe.id || !newRecipe.title) {
+      return res.status(400).json({ error: 'Invalid recipe data: must be an object with at least an id and title.' });
     }
     
     const existingData = readData();
     
-    // Check if recipe already exists
-    const existingIndex = existingData.recipes.findIndex(r => r.id === newRecipe.id);
+    const recipeList = existingData.recipes || [];
+    const existingIndex = recipeList.findIndex(r => r.id === newRecipe.id);
     
     if (existingIndex >= 0) {
       // Update existing recipe
-      existingData.recipes[existingIndex] = newRecipe;
+      recipeList[existingIndex] = newRecipe;
+      console.log('📝 Recipe updated:', newRecipe.title);
     } else {
       // Add new recipe to the beginning
-      existingData.recipes.unshift(newRecipe);
+      recipeList.unshift(newRecipe);
+      console.log('✅ Recipe added:', newRecipe.title);
     }
     
-    existingData.lastUpdated = new Date().toISOString();
+    const dataToSave = {
+        ...existingData,
+        recipes: recipeList,
+        lastUpdated: new Date().toISOString()
+    };
     
-    const success = writeData(existingData);
+    const success = writeData(dataToSave);
     
     if (success) {
-      console.log('✅ Recipe saved:', newRecipe.title);
-      res.json(newRecipe);
+      res.status(200).json(newRecipe);
     } else {
       res.status(500).json({ error: 'Failed to save recipe' });
     }
   } catch (error) {
     console.error('❌ Error saving recipe:', error);
-    res.status(500).json({ error: 'Failed to save recipe' });
+    res.status(500).json({ error: 'An internal server error occurred while saving the recipe.' });
   }
 });
 
@@ -172,5 +188,5 @@ app.get('/api/health', (req, res) => {
 
 // Start server
 app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+  console.log(`Server listening on port ${PORT}`);
 });
