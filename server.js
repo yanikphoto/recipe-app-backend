@@ -1,5 +1,3 @@
-
-
 const express = require('express');
 const cors = require('cors');
 const fs = require('fs').promises; // Use the promises version of fs for async operations
@@ -25,36 +23,35 @@ const DATA_FILE = path.join(__dirname, 'data.json');
 // --- Simple Async Lock to prevent race conditions ---
 let isLocked = false;
 const withLock = async (fn) => {
-    // Wait if the file is already being accessed.
     while (isLocked) {
         await new Promise(resolve => setTimeout(resolve, 50));
     }
     
     isLocked = true;
     try {
-        // Execute the file operation
         return await fn();
     } finally {
-        // Always release the lock
         isLocked = false;
     }
 };
 // --- End of Lock ---
 
-// Helper functions are now async and wrapped in the lock to be thread-safe
 const readData = () => withLock(async () => {
     try {
-        // Use synchronous existsSync only for initial setup check. It's safe on startup.
         if (!fsSync.existsSync(DATA_FILE)) {
-            const initialData = { recipes: [], groceryList: [] };
+            const initialData = { recipes: [], groceryList: [], deletedRecipeIds: [], deletedGroceryIds: [] };
             await fs.writeFile(DATA_FILE, JSON.stringify(initialData, null, 2));
             return initialData;
         }
         const fileContent = await fs.readFile(DATA_FILE, 'utf8');
-        return JSON.parse(fileContent);
+        const data = JSON.parse(fileContent);
+        // Ensure the deleted ID arrays exist for backward compatibility
+        data.deletedRecipeIds = data.deletedRecipeIds || [];
+        data.deletedGroceryIds = data.deletedGroceryIds || [];
+        return data;
     } catch (error) {
         console.error('Error reading data file, returning empty state:', error);
-        return { recipes: [], groceryList: [] };
+        return { recipes: [], groceryList: [], deletedRecipeIds: [], deletedGroceryIds: [] };
     }
 });
 
@@ -72,80 +69,63 @@ const writeData = (data) => withLock(async () => {
 // HARDENED: Merge recipes properly, filtering out invalid entries.
 const mergeRecipes = (existingRecipes, newRecipes) => {
   const recipeMap = new Map();
-  
-  (existingRecipes || []).filter(r => r && typeof r === 'object' && r.id).forEach(recipe => {
-    recipeMap.set(recipe.id, recipe);
-  });
-  
-  (newRecipes || []).filter(r => r && typeof r === 'object' && r.id).forEach(recipe => {
-    recipeMap.set(recipe.id, recipe);
-  });
-  
+  (existingRecipes || []).filter(r => r && typeof r === 'object' && r.id).forEach(recipe => recipeMap.set(recipe.id, recipe));
+  (newRecipes || []).filter(r => r && typeof r === 'object' && r.id).forEach(recipe => recipeMap.set(recipe.id, recipe));
   return Array.from(recipeMap.values());
 };
 
 // HARDENED: Merge grocery items properly, filtering out invalid entries.
 const mergeGroceryList = (existingItems, newItems) => {
   const itemMap = new Map();
-  
-  (existingItems || []).filter(i => i && typeof i === 'object' && i.id).forEach(item => {
-    itemMap.set(item.id, item);
-  });
-  
-  (newItems || []).filter(i => i && typeof i === 'object' && i.id).forEach(item => {
-    itemMap.set(item.id, item);
-  });
-  
+  (existingItems || []).filter(i => i && typeof i === 'object' && i.id).forEach(item => itemMap.set(item.id, item));
+  (newItems || []).filter(i => i && typeof i === 'object' && i.id).forEach(item => itemMap.set(item.id, item));
   return Array.from(itemMap.values());
 };
 
-// Routes - now all async to handle async file I/O
-app.get('/', (req, res) => {
-  res.json({ message: 'Recipe App API is running!' });
-});
+// Routes - now all async
+app.get('/', (req, res) => res.json({ message: 'Recipe App API is running!' }));
+app.get('/api/health', (req, res) => res.json({ status: 'OK', timestamp: new Date().toISOString() }));
 
-// Get all data
 app.get('/api/data', async (req, res) => {
   try {
     const data = await readData();
     res.json(data);
   } catch (error) {
-    console.error('Error in GET /api/data:', error);
     res.status(500).json({ error: 'Failed to read data' });
   }
 });
 
-// Save all data with proper merging (used for bulk updates like reordering)
 app.post('/api/data', async (req, res) => {
   try {
     const newData = req.body;
-    
     if (!newData || typeof newData !== 'object' || !Array.isArray(newData.recipes) || !Array.isArray(newData.groceryList)) {
-      return res.status(400).json({ error: 'Invalid data structure: body must be an object with recipes and groceryList arrays.' });
+      return res.status(400).json({ error: 'Invalid data structure' });
     }
     
     const existingData = await readData();
     
+    // Before merging, filter out any items from the incoming data that are on the server's deleted list.
+    const cleanNewRecipes = (newData.recipes || []).filter(r => !(existingData.deletedRecipeIds || []).includes(r.id));
+    const cleanNewGrocery = (newData.groceryList || []).filter(i => !(existingData.deletedGroceryIds || []).includes(i.id));
+
     const mergedData = {
-      recipes: mergeRecipes(existingData.recipes, newData.recipes),
-      groceryList: mergeGroceryList(existingData.groceryList, newData.groceryList),
-      lastUpdated: new Date().toISOString()
+      recipes: mergeRecipes(existingData.recipes, cleanNewRecipes),
+      groceryList: mergeGroceryList(existingData.groceryList, cleanNewGrocery),
+      lastUpdated: new Date().toISOString(),
+      deletedRecipeIds: existingData.deletedRecipeIds,
+      deletedGroceryIds: existingData.deletedGroceryIds,
     };
     
-    const success = await writeData(mergedData);
-    
-    if (success) {
+    if (await writeData(mergedData)) {
       res.status(200).json(mergedData);
     } else {
-      res.status(500).json({ error: 'Failed to save data due to file system error.' });
+      res.status(500).json({ error: 'Failed to save data' });
     }
   } catch (error) {
-    console.error('❌ Unhandled error in POST /api/data:', error);
     res.status(500).json({ error: 'An internal server error occurred.' });
   }
 });
 
-// Add/update a single recipe
 app.post('/api/recipes', async (req, res) => {
   try {
     const newRecipe = req.body;
@@ -154,6 +134,9 @@ app.post('/api/recipes', async (req, res) => {
     }
     
     const data = await readData();
+    // If we're adding/updating, it's not deleted. Remove from deleted list.
+    data.deletedRecipeIds = data.deletedRecipeIds.filter(id => id !== newRecipe.id);
+    
     const existingIndex = data.recipes.findIndex(r => r.id === newRecipe.id);
     if (existingIndex >= 0) {
       data.recipes[existingIndex] = newRecipe;
@@ -167,25 +150,23 @@ app.post('/api/recipes', async (req, res) => {
   }
 });
 
-// Delete a single recipe
 app.delete('/api/recipes/:id', async (req, res) => {
     try {
         const { id } = req.params;
         const data = await readData();
         const initialLength = data.recipes.length;
         data.recipes = data.recipes.filter(r => r.id !== id);
-        if (data.recipes.length < initialLength) {
-            await writeData(data);
-            res.status(200).json({ message: 'Recipe deleted' });
-        } else {
-            res.status(404).json({ message: 'Recipe not found' });
+        // Add to deleted IDs list to prevent re-sync from stale clients
+        if (!data.deletedRecipeIds.includes(id)) {
+            data.deletedRecipeIds.push(id);
         }
+        await writeData(data);
+        res.status(200).json({ message: 'Recipe deletion confirmed' });
     } catch (error) {
         res.status(500).json({ error: 'Failed to delete recipe' });
     }
 });
 
-// Add a single grocery item
 app.post('/api/grocery', async (req, res) => {
     try {
         const newItem = req.body;
@@ -193,7 +174,9 @@ app.post('/api/grocery', async (req, res) => {
             return res.status(400).json({ error: 'Invalid grocery item' });
         }
         const data = await readData();
-        // Prevent duplicates just in case
+        // If we're adding/updating, it's not deleted.
+        data.deletedGroceryIds = data.deletedGroceryIds.filter(id => id !== newItem.id);
+
         if (!data.groceryList.some(i => i.id === newItem.id)) {
             data.groceryList.unshift(newItem);
             await writeData(data);
@@ -204,30 +187,22 @@ app.post('/api/grocery', async (req, res) => {
     }
 });
 
-// Delete a single grocery item
 app.delete('/api/grocery/:id', async (req, res) => {
     try {
         const { id } = req.params;
         const data = await readData();
-        const initialLength = data.groceryList.length;
         data.groceryList = data.groceryList.filter(i => i.id !== id);
-        if (data.groceryList.length < initialLength) {
-            await writeData(data);
-            res.status(200).json({ message: 'Grocery item deleted' });
-        } else {
-            res.status(404).json({ message: 'Grocery item not found' });
+        // Add to deleted IDs list
+        if (!data.deletedGroceryIds.includes(id)) {
+            data.deletedGroceryIds.push(id);
         }
+        await writeData(data);
+        res.status(200).json({ message: 'Grocery item deletion confirmed' });
     } catch (error) {
         res.status(500).json({ error: 'Failed to delete grocery item' });
     }
 });
 
-// Health check
-app.get('/api/health', (req, res) => {
-  res.json({ status: 'OK', timestamp: new Date().toISOString() });
-});
-
-// Start server
 app.listen(PORT, () => {
   console.log(`Server listening on port ${PORT}`);
 });
