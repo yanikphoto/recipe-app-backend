@@ -1,63 +1,82 @@
 
+
 const express = require('express');
 const cors = require('cors');
-const fs = require('fs');
+const fs = require('fs').promises; // Use the promises version of fs for async operations
+const fsSync = require('fs'); // For one-time sync check on startup
 const path = require('path');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
 
 // Middleware
-// 🔥 FIX: Use a more explicit CORS configuration to prevent potential fetch errors.
 const corsOptions = {
-  origin: '*', // Allow all origins
-  methods: ['GET', 'POST'], // Specify allowed methods
-  allowedHeaders: ['Content-Type'], // Specify allowed headers
+  origin: '*',
+  methods: ['GET', 'POST', 'DELETE'],
+  allowedHeaders: ['Content-Type'],
 };
 app.use(cors(corsOptions));
-app.options('*', cors(corsOptions)); // Enable pre-flight for all routes
+app.options('*', cors(corsOptions));
 
 app.use(express.json({ limit: '10mb' }));
 
-// Data file path
 const DATA_FILE = path.join(__dirname, 'data.json');
 
-// Helper functions
-const readData = () => {
-  try {
-    if (!fs.existsSync(DATA_FILE)) {
-      const initialData = { recipes: [], groceryList: [] };
-      fs.writeFileSync(DATA_FILE, JSON.stringify(initialData, null, 2));
-      return initialData;
+// --- Simple Async Lock to prevent race conditions ---
+let isLocked = false;
+const withLock = async (fn) => {
+    // Wait if the file is already being accessed.
+    while (isLocked) {
+        await new Promise(resolve => setTimeout(resolve, 50));
     }
-    return JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
-  } catch (error) {
-    console.error('Error reading data file, returning empty state:', error);
-    return { recipes: [], groceryList: [] };
-  }
+    
+    isLocked = true;
+    try {
+        // Execute the file operation
+        return await fn();
+    } finally {
+        // Always release the lock
+        isLocked = false;
+    }
 };
+// --- End of Lock ---
 
-const writeData = (data) => {
-  try {
-    fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
-    return true;
-  } catch (error) {
-    console.error('Error writing data:', error);
-    return false;
-  }
-};
+// Helper functions are now async and wrapped in the lock to be thread-safe
+const readData = () => withLock(async () => {
+    try {
+        // Use synchronous existsSync only for initial setup check. It's safe on startup.
+        if (!fsSync.existsSync(DATA_FILE)) {
+            const initialData = { recipes: [], groceryList: [] };
+            await fs.writeFile(DATA_FILE, JSON.stringify(initialData, null, 2));
+            return initialData;
+        }
+        const fileContent = await fs.readFile(DATA_FILE, 'utf8');
+        return JSON.parse(fileContent);
+    } catch (error) {
+        console.error('Error reading data file, returning empty state:', error);
+        return { recipes: [], groceryList: [] };
+    }
+});
 
-// 🔥 HARDENED: Merge recipes properly, filtering out invalid entries.
+const writeData = (data) => withLock(async () => {
+    try {
+        await fs.writeFile(DATA_FILE, JSON.stringify(data, null, 2));
+        return true;
+    } catch (error) {
+        console.error('Error writing data:', error);
+        return false;
+    }
+});
+
+
+// HARDENED: Merge recipes properly, filtering out invalid entries.
 const mergeRecipes = (existingRecipes, newRecipes) => {
   const recipeMap = new Map();
   
-  // Sanitize and add existing recipes first
-  // This prevents crashes if the arrays contain null, undefined, or objects without an ID.
   (existingRecipes || []).filter(r => r && typeof r === 'object' && r.id).forEach(recipe => {
     recipeMap.set(recipe.id, recipe);
   });
   
-  // Sanitize and add/override with new recipes
   (newRecipes || []).filter(r => r && typeof r === 'object' && r.id).forEach(recipe => {
     recipeMap.set(recipe.id, recipe);
   });
@@ -65,16 +84,14 @@ const mergeRecipes = (existingRecipes, newRecipes) => {
   return Array.from(recipeMap.values());
 };
 
-// 🔥 HARDENED: Merge grocery items properly, filtering out invalid entries.
+// HARDENED: Merge grocery items properly, filtering out invalid entries.
 const mergeGroceryList = (existingItems, newItems) => {
   const itemMap = new Map();
   
-  // Sanitize and add existing items first
   (existingItems || []).filter(i => i && typeof i === 'object' && i.id).forEach(item => {
     itemMap.set(item.id, item);
   });
   
-  // Sanitize and add/override with new items
   (newItems || []).filter(i => i && typeof i === 'object' && i.id).forEach(item => {
     itemMap.set(item.id, item);
   });
@@ -82,15 +99,15 @@ const mergeGroceryList = (existingItems, newItems) => {
   return Array.from(itemMap.values());
 };
 
-// Routes
+// Routes - now all async to handle async file I/O
 app.get('/', (req, res) => {
   res.json({ message: 'Recipe App API is running!' });
 });
 
 // Get all data
-app.get('/api/data', (req, res) => {
+app.get('/api/data', async (req, res) => {
   try {
-    const data = readData();
+    const data = await readData();
     res.json(data);
   } catch (error) {
     console.error('Error in GET /api/data:', error);
@@ -98,38 +115,29 @@ app.get('/api/data', (req, res) => {
   }
 });
 
-// Save all data with proper merging
-app.post('/api/data', (req, res) => {
+// Save all data with proper merging (used for bulk updates like reordering)
+app.post('/api/data', async (req, res) => {
   try {
     const newData = req.body;
     
-    // Basic structure validation
     if (!newData || typeof newData !== 'object' || !Array.isArray(newData.recipes) || !Array.isArray(newData.groceryList)) {
       return res.status(400).json({ error: 'Invalid data structure: body must be an object with recipes and groceryList arrays.' });
     }
     
-    const existingData = readData();
+    const existingData = await readData();
     
-    // The merge functions now handle sanitation internally, preventing crashes from bad data.
     const mergedData = {
       recipes: mergeRecipes(existingData.recipes, newData.recipes),
       groceryList: mergeGroceryList(existingData.groceryList, newData.groceryList),
       lastUpdated: new Date().toISOString()
     };
     
-    console.log('📥 Merging data:');
-    console.log('  Existing recipes:', (existingData.recipes || []).length);
-    console.log('  New recipes from client:', newData.recipes.length);
-    console.log('  Merged recipes after sanitation:', mergedData.recipes.length);
-    console.log('  Merged grocery items after sanitation:', mergedData.groceryList.length);
-    
-    const success = writeData(mergedData);
+    const success = await writeData(mergedData);
     
     if (success) {
-      // Return the final, merged, and sanitized data to the client.
       res.status(200).json(mergedData);
     } else {
-      res.status(500).json({ error: 'Failed to save data' });
+      res.status(500).json({ error: 'Failed to save data due to file system error.' });
     }
   } catch (error) {
     console.error('❌ Unhandled error in POST /api/data:', error);
@@ -138,47 +146,80 @@ app.post('/api/data', (req, res) => {
 });
 
 // Add/update a single recipe
-app.post('/api/recipes', (req, res) => {
+app.post('/api/recipes', async (req, res) => {
   try {
     const newRecipe = req.body;
-    
-    // 🔥 HARDENED: Add more robust validation for the recipe object.
-    if (!newRecipe || typeof newRecipe !== 'object' || !newRecipe.id || !newRecipe.title) {
-      return res.status(400).json({ error: 'Invalid recipe data: must be an object with at least an id and title.' });
+    if (!newRecipe || !newRecipe.id || !newRecipe.title) {
+      return res.status(400).json({ error: 'Invalid recipe data' });
     }
     
-    const existingData = readData();
-    
-    const recipeList = existingData.recipes || [];
-    const existingIndex = recipeList.findIndex(r => r.id === newRecipe.id);
-    
+    const data = await readData();
+    const existingIndex = data.recipes.findIndex(r => r.id === newRecipe.id);
     if (existingIndex >= 0) {
-      // Update existing recipe
-      recipeList[existingIndex] = newRecipe;
-      console.log('📝 Recipe updated:', newRecipe.title);
+      data.recipes[existingIndex] = newRecipe;
     } else {
-      // Add new recipe to the beginning
-      recipeList.unshift(newRecipe);
-      console.log('✅ Recipe added:', newRecipe.title);
+      data.recipes.unshift(newRecipe);
     }
-    
-    const dataToSave = {
-        ...existingData,
-        recipes: recipeList,
-        lastUpdated: new Date().toISOString()
-    };
-    
-    const success = writeData(dataToSave);
-    
-    if (success) {
-      res.status(200).json(newRecipe);
-    } else {
-      res.status(500).json({ error: 'Failed to save recipe' });
-    }
+    await writeData(data);
+    res.status(200).json(newRecipe);
   } catch (error) {
-    console.error('❌ Error saving recipe:', error);
-    res.status(500).json({ error: 'An internal server error occurred while saving the recipe.' });
+    res.status(500).json({ error: 'Failed to save recipe' });
   }
+});
+
+// Delete a single recipe
+app.delete('/api/recipes/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const data = await readData();
+        const initialLength = data.recipes.length;
+        data.recipes = data.recipes.filter(r => r.id !== id);
+        if (data.recipes.length < initialLength) {
+            await writeData(data);
+            res.status(200).json({ message: 'Recipe deleted' });
+        } else {
+            res.status(404).json({ message: 'Recipe not found' });
+        }
+    } catch (error) {
+        res.status(500).json({ error: 'Failed to delete recipe' });
+    }
+});
+
+// Add a single grocery item
+app.post('/api/grocery', async (req, res) => {
+    try {
+        const newItem = req.body;
+        if (!newItem || !newItem.id || !newItem.name) {
+            return res.status(400).json({ error: 'Invalid grocery item' });
+        }
+        const data = await readData();
+        // Prevent duplicates just in case
+        if (!data.groceryList.some(i => i.id === newItem.id)) {
+            data.groceryList.unshift(newItem);
+            await writeData(data);
+        }
+        res.status(200).json(newItem);
+    } catch (error) {
+        res.status(500).json({ error: 'Failed to save grocery item' });
+    }
+});
+
+// Delete a single grocery item
+app.delete('/api/grocery/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const data = await readData();
+        const initialLength = data.groceryList.length;
+        data.groceryList = data.groceryList.filter(i => i.id !== id);
+        if (data.groceryList.length < initialLength) {
+            await writeData(data);
+            res.status(200).json({ message: 'Grocery item deleted' });
+        } else {
+            res.status(404).json({ message: 'Grocery item not found' });
+        }
+    } catch (error) {
+        res.status(500).json({ error: 'Failed to delete grocery item' });
+    }
 });
 
 // Health check
