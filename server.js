@@ -58,20 +58,26 @@ const writeData = (data) => withLock(async () => {
     }
 });
 
-// HARDENED: Merge recipes properly, filtering out invalid entries.
+// HARDENED: Merge recipes properly, preserving client order and filtering out invalid entries.
 const mergeRecipes = (existingRecipes, newRecipes) => {
-  const recipeMap = new Map();
-  (existingRecipes || []).filter(r => r && typeof r === 'object' && r.id).forEach(recipe => recipeMap.set(recipe.id, recipe));
-  (newRecipes || []).filter(r => r && typeof r === 'object' && r.id).forEach(recipe => recipeMap.set(recipe.id, recipe));
-  return Array.from(recipeMap.values());
+  const safeNewRecipes = (newRecipes || []).filter(r => r && typeof r === 'object' && r.id);
+  const safeExistingRecipes = (existingRecipes || []).filter(r => r && typeof r === 'object' && r.id);
+  
+  const newRecipeIds = new Set(safeNewRecipes.map(r => r.id));
+  const uniqueExisting = safeExistingRecipes.filter(r => !newRecipeIds.has(r.id));
+  
+  return [...safeNewRecipes, ...uniqueExisting];
 };
 
-// HARDENED: Merge grocery items properly, filtering out invalid entries.
+// HARDENED: Merge grocery items properly, preserving client order and filtering out invalid entries.
 const mergeGroceryList = (existingItems, newItems) => {
-  const itemMap = new Map();
-  (existingItems || []).filter(i => i && typeof i === 'object' && i.id).forEach(item => itemMap.set(item.id, item));
-  (newItems || []).filter(i => i && typeof i === 'object' && i.id).forEach(item => itemMap.set(item.id, item));
-  return Array.from(itemMap.values());
+  const safeNewItems = (newItems || []).filter(i => i && typeof i === 'object' && i.id);
+  const safeExistingItems = (existingItems || []).filter(i => i && typeof i === 'object' && i.id);
+
+  const newItemIds = new Set(safeNewItems.map(i => i.id));
+  const uniqueExisting = safeExistingItems.filter(i => !newItemIds.has(i.id));
+
+  return [...safeNewItems, ...uniqueExisting];
 };
 
 const mergeDeletedIds = (existingIds, newIds) => {
