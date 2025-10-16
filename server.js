@@ -58,26 +58,42 @@ const writeData = (data) => withLock(async () => {
     }
 });
 
-// HARDENED: Merge recipes properly, preserving client order and filtering out invalid entries.
+// A robust merging strategy that preserves server order for existing items 
+// and prepends new items from the client.
 const mergeRecipes = (existingRecipes, newRecipes) => {
-  const safeNewRecipes = (newRecipes || []).filter(r => r && typeof r === 'object' && r.id);
-  const safeExistingRecipes = (existingRecipes || []).filter(r => r && typeof r === 'object' && r.id);
-  
-  const newRecipeIds = new Set(safeNewRecipes.map(r => r.id));
-  const uniqueExisting = safeExistingRecipes.filter(r => !newRecipeIds.has(r.id));
-  
-  return [...safeNewRecipes, ...uniqueExisting];
+    const safeNewRecipes = (newRecipes || []).filter(r => r && typeof r === 'object' && r.id);
+    const safeExistingRecipes = (existingRecipes || []).filter(r => r && typeof r === 'object' && r.id);
+
+    const serverRecipeIds = new Set(safeExistingRecipes.map(r => r.id));
+    // Find recipes that are on the client but not on the server
+    const newFromClient = safeNewRecipes.filter(r => !serverRecipeIds.has(r.id));
+
+    // The server's list is the canonical order, we just need to update items in it from the client.
+    const clientRecipeMap = new Map(safeNewRecipes.map(r => [r.id, r]));
+    const updatedServerList = safeExistingRecipes.map(serverRecipe => 
+        clientRecipeMap.get(serverRecipe.id) || serverRecipe
+    );
+
+    return [...newFromClient, ...updatedServerList];
 };
 
-// HARDENED: Merge grocery items properly, preserving client order and filtering out invalid entries.
+
+// The same robust merging strategy for the grocery list.
 const mergeGroceryList = (existingItems, newItems) => {
-  const safeNewItems = (newItems || []).filter(i => i && typeof i === 'object' && i.id);
-  const safeExistingItems = (existingItems || []).filter(i => i && typeof i === 'object' && i.id);
+    const safeNewItems = (newItems || []).filter(i => i && typeof i === 'object' && i.id);
+    const safeExistingItems = (existingItems || []).filter(i => i && typeof i === 'object' && i.id);
 
-  const newItemIds = new Set(safeNewItems.map(i => i.id));
-  const uniqueExisting = safeExistingItems.filter(i => !newItemIds.has(i.id));
+    const serverItemIds = new Set(safeExistingItems.map(i => i.id));
+    // Find items that are on the client but not on the server
+    const newFromClient = safeNewItems.filter(i => !serverItemIds.has(i.id));
+    
+    // The server's list is the canonical order, we just need to update items in it from the client.
+    const clientItemMap = new Map(safeNewItems.map(i => [i.id, i]));
+    const updatedServerList = safeExistingItems.map(serverItem => 
+        clientItemMap.get(serverItem.id) || serverItem
+    );
 
-  return [...safeNewItems, ...uniqueExisting];
+    return [...newFromClient, ...updatedServerList];
 };
 
 const mergeDeletedIds = (existingIds, newIds) => {
