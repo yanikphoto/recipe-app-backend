@@ -5,17 +5,12 @@ const fsSync = require('fs'); // For one-time sync check on startup
 const path = require('path');
 
 const app = express();
-const PORT = process.env.PORT || 3001;
+const PORT = process.env.PORT || 8000;
 
 // Middleware
-const corsOptions = {
-  origin: '*',
-  methods: ['GET', 'POST', 'DELETE'],
-  allowedHeaders: ['Content-Type'],
-};
-app.use(cors(corsOptions));
-app.options('*', cors(corsOptions));
-
+// Use the default cors() configuration which is permissive and robust for development and most use cases.
+// It defaults to origin: '*' and handles pre-flight OPTIONS requests automatically.
+app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 
 const DATA_FILE = path.join(__dirname, 'data.json');
@@ -84,9 +79,9 @@ const mergeGroceryList = (existingItems, newItems) => {
 
 // Routes - now all async
 app.get('/', (req, res) => res.json({ message: 'Recipe App API is running!' }));
-app.get('/api/health', (req, res) => res.json({ status: 'OK', timestamp: new Date().toISOString() }));
+app.get('/health', (req, res) => res.json({ status: 'OK', timestamp: new Date().toISOString() }));
 
-app.get('/api/data', async (req, res) => {
+app.get('/data', async (req, res) => {
   try {
     const data = await readData();
     res.json(data);
@@ -95,7 +90,7 @@ app.get('/api/data', async (req, res) => {
   }
 });
 
-app.post('/api/data', async (req, res) => {
+app.post('/data', async (req, res) => {
   try {
     const newData = req.body;
     if (!newData || typeof newData !== 'object' || !Array.isArray(newData.recipes) || !Array.isArray(newData.groceryList)) {
@@ -126,7 +121,7 @@ app.post('/api/data', async (req, res) => {
   }
 });
 
-app.post('/api/recipes', async (req, res) => {
+app.post('/recipes', async (req, res) => {
   try {
     const newRecipe = req.body;
     if (!newRecipe || !newRecipe.id || !newRecipe.title) {
@@ -150,7 +145,7 @@ app.post('/api/recipes', async (req, res) => {
   }
 });
 
-app.delete('/api/recipes/:id', async (req, res) => {
+app.delete('/recipes/:id', async (req, res) => {
     try {
         const { id } = req.params;
         const data = await readData();
@@ -167,7 +162,7 @@ app.delete('/api/recipes/:id', async (req, res) => {
     }
 });
 
-app.post('/api/grocery', async (req, res) => {
+app.post('/grocery', async (req, res) => {
     try {
         const newItem = req.body;
         if (!newItem || !newItem.id || !newItem.name) {
@@ -187,7 +182,7 @@ app.post('/api/grocery', async (req, res) => {
     }
 });
 
-app.delete('/api/grocery/:id', async (req, res) => {
+app.delete('/grocery/:id', async (req, res) => {
     try {
         const { id } = req.params;
         const data = await readData();
