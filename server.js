@@ -8,8 +8,6 @@ const app = express();
 const PORT = process.env.PORT || 8000;
 
 // Middleware
-// Use the default cors() configuration which is permissive and robust for development and most use cases.
-// It defaults to origin: '*' and handles pre-flight OPTIONS requests automatically.
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 
@@ -60,7 +58,6 @@ const writeData = (data) => withLock(async () => {
     }
 });
 
-
 // HARDENED: Merge recipes properly, filtering out invalid entries.
 const mergeRecipes = (existingRecipes, newRecipes) => {
   const recipeMap = new Map();
@@ -77,6 +74,12 @@ const mergeGroceryList = (existingItems, newItems) => {
   return Array.from(itemMap.values());
 };
 
+const mergeDeletedIds = (existingIds, newIds) => {
+    const idSet = new Set([...(existingIds || []), ...(newIds || [])]);
+    return Array.from(idSet);
+};
+
+
 // Routes - now all async
 app.get('/', (req, res) => res.json({ message: 'Recipe App API is running!' }));
 app.get('/health', (req, res) => res.json({ status: 'OK', timestamp: new Date().toISOString() }));
@@ -92,111 +95,48 @@ app.get('/data', async (req, res) => {
 
 app.post('/data', async (req, res) => {
   try {
-    const newData = req.body;
-    if (!newData || typeof newData !== 'object' || !Array.isArray(newData.recipes) || !Array.isArray(newData.groceryList)) {
-      return res.status(400).json({ error: 'Invalid data structure' });
+    const clientData = req.body;
+    if (!clientData || typeof clientData !== 'object') {
+      return res.status(400).json({ error: 'Invalid data structure: body is missing or not an object' });
+    }
+     // Add more specific validation
+    if (!Array.isArray(clientData.recipes) || !Array.isArray(clientData.groceryList) || !Array.isArray(clientData.deletedRecipeIds) || !Array.isArray(clientData.deletedGroceryIds)) {
+        return res.status(400).json({ error: 'Invalid data structure: missing required arrays' });
     }
     
-    const existingData = await readData();
+    const serverData = await readData();
     
-    // Before merging, filter out any items from the incoming data that are on the server's deleted list.
-    const cleanNewRecipes = (newData.recipes || []).filter(r => !(existingData.deletedRecipeIds || []).includes(r.id));
-    const cleanNewGrocery = (newData.groceryList || []).filter(i => !(existingData.deletedGroceryIds || []).includes(i.id));
+    // 1. Merge the lists of deleted IDs first to get a complete set of all deletions.
+    const allDeletedRecipeIds = mergeDeletedIds(serverData.deletedRecipeIds, clientData.deletedRecipeIds);
+    const allDeletedGroceryIds = mergeDeletedIds(serverData.deletedGroceryIds, clientData.deletedGroceryIds);
 
-    const mergedData = {
-      recipes: mergeRecipes(existingData.recipes, cleanNewRecipes),
-      groceryList: mergeGroceryList(existingData.groceryList, cleanNewGrocery),
+    // 2. Merge the main data lists from server and client.
+    const mergedRecipes = mergeRecipes(serverData.recipes, clientData.recipes);
+    const mergedGrocery = mergeGroceryList(serverData.groceryList, clientData.groceryList);
+
+    // 3. Filter the merged lists using the complete set of deleted IDs.
+    const finalRecipes = mergedRecipes.filter(r => !allDeletedRecipeIds.includes(r.id));
+    const finalGrocery = mergedGrocery.filter(i => !allDeletedGroceryIds.includes(i.id));
+
+    const finalData = {
+      recipes: finalRecipes,
+      groceryList: finalGrocery,
       lastUpdated: new Date().toISOString(),
-      deletedRecipeIds: existingData.deletedRecipeIds,
-      deletedGroceryIds: existingData.deletedGroceryIds,
+      deletedRecipeIds: allDeletedRecipeIds,
+      deletedGroceryIds: allDeletedGroceryIds,
     };
     
-    if (await writeData(mergedData)) {
-      res.status(200).json(mergedData);
+    if (await writeData(finalData)) {
+      res.status(200).json(finalData);
     } else {
       res.status(500).json({ error: 'Failed to save data' });
     }
   } catch (error) {
+    console.error('Error in /data POST endpoint:', error);
     res.status(500).json({ error: 'An internal server error occurred.' });
   }
 });
 
-app.post('/recipes', async (req, res) => {
-  try {
-    const newRecipe = req.body;
-    if (!newRecipe || !newRecipe.id || !newRecipe.title) {
-      return res.status(400).json({ error: 'Invalid recipe data' });
-    }
-    
-    const data = await readData();
-    // If we're adding/updating, it's not deleted. Remove from deleted list.
-    data.deletedRecipeIds = data.deletedRecipeIds.filter(id => id !== newRecipe.id);
-    
-    const existingIndex = data.recipes.findIndex(r => r.id === newRecipe.id);
-    if (existingIndex >= 0) {
-      data.recipes[existingIndex] = newRecipe;
-    } else {
-      data.recipes.unshift(newRecipe);
-    }
-    await writeData(data);
-    res.status(200).json(newRecipe);
-  } catch (error) {
-    res.status(500).json({ error: 'Failed to save recipe' });
-  }
-});
-
-app.delete('/recipes/:id', async (req, res) => {
-    try {
-        const { id } = req.params;
-        const data = await readData();
-        const initialLength = data.recipes.length;
-        data.recipes = data.recipes.filter(r => r.id !== id);
-        // Add to deleted IDs list to prevent re-sync from stale clients
-        if (!data.deletedRecipeIds.includes(id)) {
-            data.deletedRecipeIds.push(id);
-        }
-        await writeData(data);
-        res.status(200).json({ message: 'Recipe deletion confirmed' });
-    } catch (error) {
-        res.status(500).json({ error: 'Failed to delete recipe' });
-    }
-});
-
-app.post('/grocery', async (req, res) => {
-    try {
-        const newItem = req.body;
-        if (!newItem || !newItem.id || !newItem.name) {
-            return res.status(400).json({ error: 'Invalid grocery item' });
-        }
-        const data = await readData();
-        // If we're adding/updating, it's not deleted.
-        data.deletedGroceryIds = data.deletedGroceryIds.filter(id => id !== newItem.id);
-
-        if (!data.groceryList.some(i => i.id === newItem.id)) {
-            data.groceryList.unshift(newItem);
-            await writeData(data);
-        }
-        res.status(200).json(newItem);
-    } catch (error) {
-        res.status(500).json({ error: 'Failed to save grocery item' });
-    }
-});
-
-app.delete('/grocery/:id', async (req, res) => {
-    try {
-        const { id } = req.params;
-        const data = await readData();
-        data.groceryList = data.groceryList.filter(i => i.id !== id);
-        // Add to deleted IDs list
-        if (!data.deletedGroceryIds.includes(id)) {
-            data.deletedGroceryIds.push(id);
-        }
-        await writeData(data);
-        res.status(200).json({ message: 'Grocery item deletion confirmed' });
-    } catch (error) {
-        res.status(500).json({ error: 'Failed to delete grocery item' });
-    }
-});
 
 app.listen(PORT, () => {
   console.log(`Server listening on port ${PORT}`);
