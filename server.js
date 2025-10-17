@@ -58,7 +58,7 @@ const writeData = (data) => withLock(async () => {
     }
 });
 
-// A robust merging strategy that preserves server order for existing items 
+// A robust merging strategy that preserves server order for existing items
 // and prepends new items from the client.
 const mergeRecipes = (existingRecipes, newRecipes) => {
     const safeNewRecipes = (newRecipes || []).filter(r => r && typeof r === 'object' && r.id);
@@ -70,9 +70,24 @@ const mergeRecipes = (existingRecipes, newRecipes) => {
 
     // The server's list is the canonical order, we just need to update items in it from the client.
     const clientRecipeMap = new Map(safeNewRecipes.map(r => [r.id, r]));
-    const updatedServerList = safeExistingRecipes.map(serverRecipe => 
-        clientRecipeMap.get(serverRecipe.id) || serverRecipe
-    );
+    
+    const updatedServerList = safeExistingRecipes.map(serverRecipe => {
+        const clientRecipe = clientRecipeMap.get(serverRecipe.id);
+        if (!clientRecipe) {
+            // Client doesn't have this recipe, so keep the server's version.
+            return serverRecipe;
+        }
+
+        // The client has a version. We'll use it as the base,
+        // but preserve the server's image if the client didn't provide one.
+        // This prevents accidental image deletion if a client's local cache is corrupt.
+        if (!clientRecipe.imageBase64 && serverRecipe.imageBase64) {
+            return { ...clientRecipe, imageBase64: serverRecipe.imageBase64 };
+        }
+
+        // Otherwise, the client's version is authoritative (it may have a new or no image).
+        return clientRecipe;
+    });
 
     return [...newFromClient, ...updatedServerList];
 };
