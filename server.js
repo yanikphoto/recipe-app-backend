@@ -77,16 +77,25 @@ const mergeRecipes = (existingRecipes, newRecipes) => {
             // Client doesn't have this recipe, so keep the server's version.
             return serverRecipe;
         }
+        
+        // Default to epoch if updatedAt is missing for backward compatibility
+        const serverTime = serverRecipe.updatedAt ? new Date(serverRecipe.updatedAt).getTime() : 0;
+        const clientTime = clientRecipe.updatedAt ? new Date(clientRecipe.updatedAt).getTime() : 0;
 
-        // The client has a version. We'll use it as the base,
-        // but preserve the server's image if the client didn't provide one.
-        // This prevents accidental image deletion if a client's local cache is corrupt.
-        if (!clientRecipe.imageBase64 && serverRecipe.imageBase64) {
-            return { ...clientRecipe, imageBase64: serverRecipe.imageBase64 };
+        // If client is newer or timestamps are equal, client wins
+        if (clientTime >= serverTime) {
+            // The client has a newer or same version. We'll use it as the base,
+            // but preserve the server's image if the client didn't provide one.
+            // This prevents accidental image deletion if a client's local cache is corrupt.
+            if (!clientRecipe.imageBase64 && serverRecipe.imageBase64) {
+                return { ...clientRecipe, imageBase64: serverRecipe.imageBase64 };
+            }
+            // Otherwise, the client's version is authoritative.
+            return clientRecipe;
+        } else {
+            // The server's version is newer, so we keep it.
+            return serverRecipe;
         }
-
-        // Otherwise, the client's version is authoritative (it may have a new or no image).
-        return clientRecipe;
     });
 
     return [...newFromClient, ...updatedServerList];
