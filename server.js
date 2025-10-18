@@ -157,16 +157,24 @@ app.post('/data', async (req, res) => {
     const finalRecipes = mergedRecipes.filter(r => !allDeletedRecipeIds.includes(r.id));
     const finalGrocery = mergedGrocery.filter(i => !allDeletedGroceryIds.includes(i.id));
 
-    const finalData = {
+    const DELETED_ID_HISTORY_LIMIT = 1000;
+
+    const finalDataToSave = {
       recipes: finalRecipes,
       groceryList: finalGrocery,
       lastUpdated: new Date().toISOString(),
-      deletedRecipeIds: allDeletedRecipeIds,
-      deletedGroceryIds: allDeletedGroceryIds,
+      deletedRecipeIds: allDeletedRecipeIds.slice(-DELETED_ID_HISTORY_LIMIT),
+      deletedGroceryIds: allDeletedGroceryIds.slice(-DELETED_ID_HISTORY_LIMIT),
     };
     
-    if (await writeData(finalData)) {
-      res.status(200).json(finalData);
+    const finalDataToSend = {
+        recipes: finalRecipes,
+        groceryList: finalGrocery,
+        lastUpdated: new Date().toISOString(),
+    };
+    
+    if (await writeData(finalDataToSave)) {
+      res.status(200).json(finalDataToSend);
     } else {
       res.status(500).json({ error: 'Failed to save data' });
     }
