@@ -58,66 +58,59 @@ const writeData = (data) => withLock(async () => {
     }
 });
 
-// A robust merging strategy that preserves server order for existing items
-// and prepends new items from the client.
-const mergeRecipes = (existingRecipes, newRecipes) => {
-    const safeNewRecipes = (newRecipes || []).filter(r => r && typeof r === 'object' && r.id);
-    const safeExistingRecipes = (existingRecipes || []).filter(r => r && typeof r === 'object' && r.id);
+const mergeOrderedList = (serverList, clientList) => {
+    const safeClientList = (clientList || []).filter(i => i && typeof i === 'object' && i.id);
+    const safeServerList = (serverList || []).filter(i => i && typeof i === 'object' && i.id);
 
-    const serverRecipeIds = new Set(safeExistingRecipes.map(r => r.id));
-    // Find recipes that are on the client but not on the server
-    const newFromClient = safeNewRecipes.filter(r => !serverRecipeIds.has(r.id));
-
-    // The server's list is the canonical order, we just need to update items in it from the client.
-    const clientRecipeMap = new Map(safeNewRecipes.map(r => [r.id, r]));
-    
-    const updatedServerList = safeExistingRecipes.map(serverRecipe => {
-        const clientRecipe = clientRecipeMap.get(serverRecipe.id);
-        if (!clientRecipe) {
-            // Client doesn't have this recipe, so keep the server's version.
-            return serverRecipe;
-        }
-        
-        // Default to epoch if updatedAt is missing for backward compatibility
-        const serverTime = serverRecipe.updatedAt ? new Date(serverRecipe.updatedAt).getTime() : 0;
-        const clientTime = clientRecipe.updatedAt ? new Date(clientRecipe.updatedAt).getTime() : 0;
-
-        // If client is newer or timestamps are equal, client wins
-        if (clientTime >= serverTime) {
-            // The client has a newer or same version. We'll use it as the base,
-            // but preserve the server's image if the client didn't provide one.
-            // This prevents accidental image deletion if a client's local cache is corrupt.
-            if (!clientRecipe.imageBase64 && serverRecipe.imageBase64) {
-                return { ...clientRecipe, imageBase64: serverRecipe.imageBase64 };
-            }
-            // Otherwise, the client's version is authoritative.
-            return clientRecipe;
+    // 1. Create a map of the most up-to-date version of every single item.
+    const allItemsMap = new Map();
+    [...safeServerList, ...safeClientList].forEach(item => {
+        const existing = allItemsMap.get(item.id);
+        if (!existing) {
+            allItemsMap.set(item.id, item);
         } else {
-            // The server's version is newer, so we keep it.
-            return serverRecipe;
+            const existingTime = existing.updatedAt ? new Date(existing.updatedAt).getTime() : 0;
+            const newTime = item.updatedAt ? new Date(item.updatedAt).getTime() : 0;
+            if (newTime >= existingTime) {
+                 if (item.instructions && !item.imageBase64 && existing.imageBase64) {
+                    allItemsMap.set(item.id, { ...item, imageBase64: existing.imageBase64 });
+                } else {
+                    allItemsMap.set(item.id, item);
+                }
+            }
         }
     });
 
-    return [...newFromClient, ...updatedServerList];
-};
+    // 2. Determine which list's order is authoritative using a median timestamp score.
+    // This correctly prioritizes a full list reorder (many identical recent timestamps)
+    // over a single new item addition.
+    const getListRecencyScore = (list) => {
+        if (!list || list.length === 0) return 0;
+        const timestamps = list.map(i => i.updatedAt ? new Date(i.updatedAt).getTime() : 0);
+        const sortedTimestamps = timestamps.sort((a, b) => b - a);
+        const medianIndex = Math.floor(sortedTimestamps.length / 2);
+        return sortedTimestamps[medianIndex] || 0;
+    };
 
+    const clientScore = getListRecencyScore(safeClientList);
+    const serverScore = getListRecencyScore(safeServerList);
 
-// The same robust merging strategy for the grocery list.
-const mergeGroceryList = (existingItems, newItems) => {
-    const safeNewItems = (newItems || []).filter(i => i && typeof i === 'object' && i.id);
-    const safeExistingItems = (existingItems || []).filter(i => i && typeof i === 'object' && i.id);
-
-    const serverItemIds = new Set(safeExistingItems.map(i => i.id));
-    // Find items that are on the client but not on the server
-    const newFromClient = safeNewItems.filter(i => !serverItemIds.has(i.id));
+    const authoritativeList = clientScore >= serverScore ? safeClientList : safeServerList;
+    const otherList = clientScore >= serverScore ? safeServerList : safeClientList;
     
-    // The server's list is the canonical order, we just need to update items in it from the client.
-    const clientItemMap = new Map(safeNewItems.map(i => [i.id, i]));
-    const updatedServerList = safeExistingItems.map(serverItem => 
-        clientItemMap.get(serverItem.id) || serverItem
-    );
+    const authoritativeIds = new Set(authoritativeList.map(i => i.id));
+    
+    // 3. Build the final list. Start with the authoritative order.
+    let mergedList = authoritativeList.map(item => allItemsMap.get(item.id));
 
-    return [...newFromClient, ...updatedServerList];
+    // 4. Add any items from the other list that weren't in the authoritative one.
+    otherList.forEach(item => {
+        if (!authoritativeIds.has(item.id)) {
+            mergedList.push(allItemsMap.get(item.id));
+        }
+    });
+    
+    return mergedList.filter(Boolean);
 };
 
 const mergeDeletedIds = (existingIds, newIds) => {
@@ -157,8 +150,8 @@ app.post('/data', async (req, res) => {
     const allDeletedGroceryIds = mergeDeletedIds(serverData.deletedGroceryIds, clientData.deletedGroceryIds);
 
     // 2. Merge the main data lists from server and client.
-    const mergedRecipes = mergeRecipes(serverData.recipes, clientData.recipes);
-    const mergedGrocery = mergeGroceryList(serverData.groceryList, clientData.groceryList);
+    const mergedRecipes = mergeOrderedList(serverData.recipes, clientData.recipes);
+    const mergedGrocery = mergeOrderedList(serverData.groceryList, clientData.groceryList);
 
     // 3. Filter the merged lists using the complete set of deleted IDs.
     const finalRecipes = mergedRecipes.filter(r => !allDeletedRecipeIds.includes(r.id));
