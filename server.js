@@ -12,6 +12,16 @@ app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 
 const DATA_FILE = path.join(__dirname, 'data.json');
+const UPLOADS_DIR = path.join(__dirname, 'uploads');
+
+// Ensure uploads directory exists on startup
+if (!fsSync.existsSync(UPLOADS_DIR)) {
+    fsSync.mkdirSync(UPLOADS_DIR);
+}
+
+// Serve image files statically
+app.use('/uploads', express.static(UPLOADS_DIR));
+
 
 // --- Simple Async Lock to prevent race conditions ---
 let isLocked = false;
@@ -154,8 +164,30 @@ app.post('/data', async (req, res) => {
     const mergedGrocery = mergeOrderedList(serverData.groceryList, clientData.groceryList);
 
     // 3. Filter the merged lists using the complete set of deleted IDs.
-    const finalRecipes = mergedRecipes.filter(r => !allDeletedRecipeIds.includes(r.id));
+    const finalRecipesRaw = mergedRecipes.filter(r => !allDeletedRecipeIds.includes(r.id));
     const finalGrocery = mergedGrocery.filter(i => !allDeletedGroceryIds.includes(i.id));
+
+    // 4. Process images: save base64 data to files and strip it from the recipe objects
+    const finalRecipes = await Promise.all(finalRecipesRaw.map(async (recipe) => {
+        if (recipe.imageBase64) {
+            try {
+                const imagePath = path.join(UPLOADS_DIR, `${recipe.imageUrl}.jpg`);
+                // Use a temporary file and rename to avoid partial writes during sync
+                const tempPath = imagePath + '.tmp';
+                await fs.writeFile(tempPath, recipe.imageBase64, { encoding: 'base64' });
+                await fs.rename(tempPath, imagePath);
+                
+                const { imageBase64, ...recipeForStorage } = recipe;
+                return recipeForStorage;
+            } catch (e) {
+                console.error(`Failed to save image for recipe ${recipe.id}:`, e);
+                // If saving fails, still return the recipe without base64 to prevent memory issues
+                const { imageBase64, ...recipeForStorage } = recipe;
+                return recipeForStorage;
+            }
+        }
+        return recipe;
+    }));
 
     const DELETED_ID_HISTORY_LIMIT = 1000;
 
