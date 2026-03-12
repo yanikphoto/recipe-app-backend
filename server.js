@@ -199,10 +199,13 @@ app.post('/data', async (req, res) => {
       deletedGroceryIds: allDeletedGroceryIds.slice(-DELETED_ID_HISTORY_LIMIT),
     };
     
+    // BUG FIX: Added deletedRecipeIds and deletedGroceryIds so the app knows what to delete!
     const finalDataToSend = {
         recipes: finalRecipes,
         groceryList: finalGrocery,
         lastUpdated: new Date().toISOString(),
+        deletedRecipeIds: allDeletedRecipeIds.slice(-DELETED_ID_HISTORY_LIMIT),
+        deletedGroceryIds: allDeletedGroceryIds.slice(-DELETED_ID_HISTORY_LIMIT),
     };
     
     if (await writeData(finalDataToSave)) {
