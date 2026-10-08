@@ -121,7 +121,11 @@ const mergeOrderedList = (serverList, clientList) => {
     const safeServerList = (serverList || []).filter(i => i && typeof i === 'object' && i.id);
 
     const allItemsMap = new Map();
-    [...safeServerList, ...safeClientList].forEach(item => {
+    safeServerList.forEach(item => {
+        allItemsMap.set(item.id, item);
+    });
+
+    safeClientList.forEach(item => {
         const existing = allItemsMap.get(item.id);
         if (!existing) {
             allItemsMap.set(item.id, item);
@@ -138,31 +142,26 @@ const mergeOrderedList = (serverList, clientList) => {
         }
     });
 
-    const getListRecencyScore = (list) => {
-        if (!list || list.length === 0) return 0;
-        const timestamps = list.map(i => i.updatedAt ? new Date(i.updatedAt).getTime() : 0);
-        const sortedTimestamps = timestamps.sort((a, b) => b - a);
-        const medianIndex = Math.floor(sortedTimestamps.length / 2);
-        return sortedTimestamps[medianIndex] || 0;
-    };
+    const result = [];
+    const addedIds = new Set();
 
-    const clientScore = getListRecencyScore(safeClientList);
-    const serverScore = getListRecencyScore(safeServerList);
+    safeServerList.forEach(item => {
+        const mergedItem = allItemsMap.get(item.id);
+        if (mergedItem && !addedIds.has(item.id)) {
+            result.push(mergedItem);
+            addedIds.add(item.id);
+        }
+    });
 
-    const authoritativeList = clientScore >= serverScore ? safeClientList : safeServerList;
-    const otherList = clientScore >= serverScore ? safeServerList : safeClientList;
-    
-    const authoritativeIds = new Set(authoritativeList.map(i => i.id));
-    
-    let mergedList = authoritativeList.map(item => allItemsMap.get(item.id));
-
-    otherList.forEach(item => {
-        if (!authoritativeIds.has(item.id)) {
-            mergedList.push(allItemsMap.get(item.id));
+    safeClientList.forEach(item => {
+        const mergedItem = allItemsMap.get(item.id);
+        if (mergedItem && !addedIds.has(item.id)) {
+            result.push(mergedItem);
+            addedIds.add(item.id);
         }
     });
     
-    return mergedList.filter(Boolean);
+    return result;
 };
 
 const mergeDeletedIds = (existingIds, newIds) => {
@@ -214,13 +213,14 @@ app.post('/data', async (req, res) => {
     const finalRecipes = await Promise.all(finalRecipesRaw.map(async (recipe) => {
         if (recipe.imageBase64 && recipe.imageUrl) {
             try {
+                const cleanBase64 = recipe.imageBase64.replace(/^data:image\/\w+;base64,/, '');
                 // Save to images object in data.json
-                imagesStore[recipe.imageUrl] = recipe.imageBase64;
+                imagesStore[recipe.imageUrl] = cleanBase64;
 
                 // Also save file to disk
                 const imagePath = path.join(UPLOADS_DIR, `${recipe.imageUrl}.jpg`);
                 const tempPath = imagePath + '.tmp';
-                await fs.writeFile(tempPath, recipe.imageBase64, { encoding: 'base64' });
+                await fs.writeFile(tempPath, cleanBase64, { encoding: 'base64' });
                 await fs.rename(tempPath, imagePath);
             } catch (e) {
                 console.error(`Failed to save image for recipe ${recipe.id}:`, e);
